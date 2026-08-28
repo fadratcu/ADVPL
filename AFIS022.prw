@@ -11,8 +11,8 @@
 //   - "SUAEMPRESA_TSS" -> era o nome do banco de dados do TSS, que incluia
 //                         o nome da empresa
 // Se for reaproveitar este codigo em outro ambiente, troque esses dois
-// placeholders (e o caminho "G:\Departamentos\Sintegra", se quiser) pelos
-// valores reais do seu ambiente antes de compilar.
+// placeholders (e os caminhos "G:\Sintegra" / "Departamentos\Sintegra", se
+// quiser) pelos valores reais do seu ambiente antes de compilar.
 //===================================================================================
 
 //===================================================================================
@@ -32,6 +32,21 @@
 //              acontece alguns dias depois da liberacao do pedido) ainda vai
 //              travar com "Irregularidade Fiscal" direto na Sefaz - funcionando
 //              como uma segunda camada de seguranca fora do escopo do AFIS022.
+// Alteracao  : Fabio Dratcu - 28/08/2026 - Adicionada consulta auxiliar
+//              automatica na API publica do cnpj.ws (ver AFIS022FALLBACK/
+//              AFIS022CNPJWS), tentada ANTES de pedir o print manual, nos casos
+//              em que o TSS/Sefaz nao pode ser consultado (sem comunicacao,
+//              entidade nao configurada, OU contribuinte "nao encontrado" no
+//              retorno real do TSS). So confirma sozinha (cCodRet "100")
+//              quando a IE aparece la como ATIVA para o estado informado -
+//              qualquer outro resultado (inconclusivo, nao encontrado, ou
+//              aparecendo como baixada) cai no fluxo de print manual, exatamente
+//              como antes. Desligavel via parametro MV_XCNPJWS (.T. = ligado).
+//              Limitacoes conhecidas: so cobre CNPJ (nao ha consulta de IE por
+//              CPF nesse servico), o retorno so tem "ativo" true/false sem data
+//              de baixa, e os dados tem defasagem de ate 45 dias (nao e tempo
+//              real como o TSS) - por isso esse fallback nunca bloqueia sozinho,
+//              so libera quando confirma ativo.
 // Descricao  : Retorna um objeto com:
 //              lOk           -> .T. se houve comunicacao com o TSS/Sefaz OU se o
 //                                usuario confirmou manualmente via print (cCodRet=103)
@@ -49,7 +64,9 @@
 //              cMsg          -> Mensagem complementar ou de erro
 //              cCodRet       -> "100"=Habilitado (ou isento confirmado: nao encontrado
 //                                     ou encontrado porem baixado na Sefaz; ou nao-isento
-//                                     baixado MAS com data de baixa informada - libera com alerta)
+//                                     baixado MAS com data de baixa informada - libera com alerta;
+//                                     ou confirmado ATIVO via consulta auxiliar no cnpj.ws quando
+//                                     o TSS/Sefaz nao respondeu - ver cMsg pra saber a origem)
 //                               "101"=Nao habilitado/baixado/suspenso, SEM data de baixa
 //                                     informada (quando NAO e isento)
 //                               "102"=IE/CNPJ/CPF informados divergem do que a Sefaz retornou,
@@ -176,7 +193,13 @@ User Function AFIS022(cUF, cCNPJ, cCPF, cIE)
 		//*** via print aqui, com a mesma exigencia de conferencia visual.
 		oRet["cMsg"] := "Entidade nao encontrada no SPED001 para o CNPJ da empresa."
 
-		If AFIS022PRINT(cUF, cCNPJ, cCPF, cIE)
+		//*** 28/08/2026: antes de pedir o print, tenta a consulta auxiliar
+		//*** automatica no cnpj.ws - so libera sozinha se confirmar ATIVA.
+		If AFIS022FALLBACK(cUF, cCNPJ, cIE, lIsento)
+			oRet["lOk"]     := .T.
+			oRet["cCodRet"] := "100"
+			oRet["cMsg"]    += " IE confirmada ATIVA via consulta auxiliar (cnpj.ws)."
+		ElseIf AFIS022PRINT(cUF, cCNPJ, cCPF, cIE)
 			oRet["lOk"]     := .T.
 			oRet["cCodRet"] := "103"
 			oRet["cMsg"]    += " IE liberada mediante conferencia manual do usuario (print exigido, salvo na pasta de rede)."
@@ -254,11 +277,17 @@ User Function AFIS022(cUF, cCNPJ, cCPF, cIE)
 	If !lConsultaOk
 
 		//*** Esgotou as tentativas de retry sem conseguir falar com a Sefaz/TSS.
-		//*** A pedido do Fabio (27/08/2026): em vez de so avisar e travar, exige
-		//*** que o usuario anexe um print da consulta manual (Sintegra/Sefaz),
-		//*** salvo na pasta de rede Departamentos\Sintegra, e confirme
-		//*** explicitamente que verificou a situacao da IE.
-		If AFIS022PRINT(cUF, cCNPJ, cCPF, cIE)
+		//*** Em 27/08/2026: em vez de so avisar e travar, exige que o usuário
+		//*** anexe um print da consulta manual (Sintegra/Sefaz),salvo na pasta
+		//***  de rede Departamentos\Sintegra, e confirme explicitamente que
+		//***  verificou a situacao da IE.
+		//*** 28/08/2026: antes de pedir o print, tenta a consulta auxiliar
+		//*** automatica no cnpj.ws - so libera sozinha se confirmar ATIVA.
+		If AFIS022FALLBACK(cUF, cCNPJ, cIE, lIsento)
+			oRet["lOk"]     := .T.
+			oRet["cCodRet"] := "100"
+			oRet["cMsg"]    := "Sefaz sem comunicacao apos " + AllTrim(Str(nMaxTentativas)) + " tentativas - IE confirmada ATIVA via consulta auxiliar (cnpj.ws)."
+		ElseIf AFIS022PRINT(cUF, cCNPJ, cCPF, cIE)
 			oRet["lOk"]     := .T.
 			oRet["cCodRet"] := "103"
 			oRet["cMsg"]    := "Sefaz sem comunicacao apos " + AllTrim(Str(nMaxTentativas)) + " tentativas - IE liberada mediante conferencia manual do usuario (print exigido, salvo na pasta de rede)."
@@ -273,13 +302,24 @@ User Function AFIS022(cUF, cCNPJ, cCPF, cIE)
 
 		//*** cCodRet ja foi setado dentro do loop: "100" (isento confirmado -
 		//*** resultado valido, nao pede print) ou "000" (nao-isento, contribuinte
-		//*** nao encontrado na Sefaz). A pedido do Fabio (27/08/2026), o "000"
+		//*** nao encontrado na Sefaz). Em 27/08/2026 decidi que o "000"
 		//*** tambem passa pela confirmacao manual via print, pelo mesmo motivo
 		//*** dos casos "999": o cadastro da Sefaz pode estar desatualizado/
 		//*** divergente, e o operador pode ter uma prova visual de que a IE existe.
 		If oRet["cCodRet"] == "000"
 
-			If AFIS022PRINT(cUF, cCNPJ, cCPF, cIE)
+			//*** 28/08/2026: antes de pedir o print, tenta a consulta auxiliar
+			//*** automatica no cnpj.ws - so libera sozinha se confirmar ATIVA.
+			//*** Adicionado aqui tambem (Fabio Dratcu): mesmo o TSS tendo
+			//*** respondido "nao encontrado" pra esse CNPJ (resposta real, nao
+			//*** falha de comunicacao), na pratica isso as vezes acontece com
+			//*** CNPJ que esta ativo e cadastrado normalmente na Sefaz - so nao
+			//*** foi encontrado pelo TSS .
+			If AFIS022FALLBACK(cUF, cCNPJ, cIE, lIsento)
+				oRet["lOk"]     := .T.
+				oRet["cCodRet"] := "100"
+				oRet["cMsg"]    += " IE confirmada ATIVA via consulta auxiliar (cnpj.ws)."
+			ElseIf AFIS022PRINT(cUF, cCNPJ, cCPF, cIE)
 				oRet["cCodRet"] := "103"
 				oRet["cMsg"]    := "Contribuinte nao encontrado no cadastro da Sefaz, mas liberado mediante conferencia manual do usuario (print exigido, salvo na pasta de rede)."
 			Else
@@ -404,9 +444,7 @@ Static Function AFIS022PRINT(cUF, cCNPJ, cCPF, cIE)
 	MsgAlert("Nao foi possivel validar a IE automaticamente na Sefaz-" + cUF + "." + CRLF + CRLF + ;
 		"CNPJ/CPF: " + IIf(!Empty(cCNPJ), cCNPJ, cCPF) + "   IE: " + IIf(Empty(cIE), "ISENTO", cIE) + CRLF + CRLF + ;
 		"Consulte manualmente no Sintegra (www.sintegra.gov.br) ou no site da Sefaz-" + cUF + "," + CRLF + ;
-		"tire um print da tela de confirmacao, SALVE na pasta Departamentos\Sintegra" + CRLF + ;
-		"(G:\Departamentos\Sintegra ou \\SEUSERVIDOR\Departamentos\Sintegra)" + CRLF + ;
-		"e selecione o arquivo na proxima tela.", ;
+		"tire um print da tela de confirmacao, SALVE na pasta Departamentos\Sintegra e selecione o arquivo na proxima tela.", ;
 		"Confirmacao manual de IE - Sefaz indisponivel")
 
 	//*** O filtro "Imagens (*.jpg;*.jpeg;*.png;*.bmp)" testado nesse widget web
@@ -415,10 +453,13 @@ Static Function AFIS022PRINT(cUF, cCNPJ, cCPF, cIE)
 	//*** com ";" nao funciona direito aqui. Como ja validamos a extensao na
 	//*** unha logo abaixo, deixamos so "Todos os Arquivos" (que funciona) e a
 	//*** validacao pos-selecao garante que so imagem passa.
-	//*** cPath ja inicia direto na pasta de rede (Departamentos\Sintegra), pra
-	//*** o usuario ja cair no lugar certo pra selecionar (e ter salvo) o print.
+	//*** cPath ja inicia direto na pasta de rede (via drive G: mapeado direto em
+	//*** Departamentos), pra o usuario ja cair no lugar certo pra selecionar (e
+	//*** ter salvo) o print. Fabio Dratcu - 28/08/2026: G: aponta direto pra
+	//*** Departamentos, entao o caminho aqui e "G:\Sintegra\" (nao
+	//*** "G:\Departamentos\Sintegra\", que nao existiria nesse mapeamento).
 	cArqPrint := cGetFile("Todos os Arquivos (*.*)|*.*|", ;
-		"Selecione o print da consulta de IE (salvo em Departamentos\Sintegra)", 1, "G:\Departamentos\Sintegra\", .F., GETF_LOCALHARD, .T., .F.)
+		"Selecione o print da consulta de IE (salvo em Departamentos\Sintegra)", 1, "G:\Sintegra\", .F., GETF_LOCALHARD, .T., .F.)
 
 	If Empty(cArqPrint)
 		MsgAlert("Nenhum arquivo selecionado - operacao bloqueada.", "Atencao")
@@ -435,13 +476,16 @@ Static Function AFIS022PRINT(cUF, cCNPJ, cCPF, cIE)
 	EndIf
 
 	//*** exige que o print esteja salvo na pasta de rede compartilhada
-	//*** (Departamentos\Sintegra), acessivel via drive mapeado G: ou via UNC
-	//*** direto no servidor SEUSERVIDOR - assim o print fica guardado la, sem
-	//*** o AFIS022 precisar copiar/gravar o arquivo em lugar nenhum.
+	//*** (Departamentos\Sintegra), acessivel via drive mapeado G: (que ja
+	//*** aponta direto pra Departamentos, entao "G:\SINTEGRA" - 11 caracteres)
+	//*** ou via UNC direto no servidor SEUSERVIDOR (que vai na raiz do servidor,
+	//*** entao precisa do caminho completo "\\SEUSERVIDOR\DEPARTAMENTOS\SINTEGRA"
+	//*** - 36 caracteres) - assim o print fica guardado la, sem o AFIS022
+	//*** precisar copiar/gravar o arquivo em lugar nenhum.
 	//*** Fabio Dratcu - 28/08/2026.
-	If Left(Upper(cArqPrint), 11) <> "G:\SINTEGRA" .AND. Left(Upper(cArqPrint), 36) <> "\\SEUSERVIDOR"
+	If Left(Upper(cArqPrint), 11) <> "G:\SINTEGRA" .AND. Left(Upper(cArqPrint), 36) <> "\\SEUSERVIDOR\DEPARTAMENTOS\SINTEGRA"
 		MsgAlert("O print precisa ser salvo na pasta Departamentos\Sintegra" + CRLF + ;
-			"(G:\Departamentos\Sintegra ou \\SEUSERVIDOR\Departamentos\Sintegra) antes de selecionar o arquivo." + CRLF + CRLF + ;
+			"(G:\Sintegra\ ou \\SEUSERVIDOR\Departamentos\Sintegra\) antes de selecionar o arquivo." + CRLF + CRLF + ;
 			"Arquivo selecionado: " + cArqPrint, "Atencao")
 		Return .F.
 	EndIf
@@ -540,3 +584,176 @@ Static Function AFIS022ISREADY(cURLTss)
 	End Sequence
 
 Return lRetorno
+
+//===================================================================================
+// Funcao     : AFIS022FALLBACK
+// Objetivo   : Decide SE vale a pena tentar a consulta auxiliar no cnpj.ws antes
+//              de pedir o print manual, e chama AFIS022CNPJWS() quando fizer
+//              sentido. So retorna .T. quando a IE veio confirmada ATIVA la -
+//              qualquer outro caso (desligado no parametro, isento, sem CNPJ,
+//              inconclusivo, ou aparecendo como baixada) retorna .F. e quem
+//              chamou continua pro fluxo de print manual normalmente, exatamente
+//              como antes dessa alteracao.
+// Autor-Data : Fabio Dratcu - 28/08/2026
+//===================================================================================
+Static Function AFIS022FALLBACK(cUF, cCNPJ, cIE, lIsento)
+
+	Local lUsaCnpjWs := SuperGetMV("MV_XCNPJWS", NIL, .T.)  //*** .T. = ligado por padrao
+	Local oCons       := Nil
+	Local lRet        := .F.
+
+	If lUsaCnpjWs .And. !lIsento .And. !Empty(cCNPJ)
+
+		oCons := AFIS022CNPJWS(cUF, cCNPJ, cIE)
+
+		If oCons["lConclusivo"] .And. oCons["lAtiva"]
+			lRet := .T.
+		EndIf
+
+		//*** log enxuto - so o resultado final, pra dar pra auditar depois sem
+		//*** poluir o console em toda consulta com falha de TSS.
+		ConOut("AFIS022FALLBACK - CNPJ=[" + cCNPJ + "] UF=[" + cUF + "] - consulta auxiliar (cnpj.ws): " + ;
+			IIf(!oCons["lConclusivo"], "inconclusiva", IIf(oCons["lAtiva"], "ATIVA - liberado automaticamente", "inativa/baixada - nao libera sozinho")))
+
+	EndIf
+
+Return lRet
+
+//===================================================================================
+// Funcao     : AFIS022CNPJWS
+// Objetivo   : Consulta auxiliar (NAO substitui a Sefaz) na API publica do
+//              cnpj.ws (https://publica.cnpj.ws), usada SOMENTE quando o
+//              TSS/Sefaz nao pode ser consultado, como uma segunda tentativa
+//              automatica ANTES de pedir o print manual pro usuario.
+// Limitacoes conhecidas (por isso esse fallback nunca bloqueia sozinho, so
+// libera quando confirma ativo - Fabio Dratcu, 28/08/2026):
+//  - So cobre CNPJ - esse servico nao tem consulta de IE por CPF. Se cCNPJ
+//    vier vazio ou invalido, a funcao nem tenta e retorna inconclusivo.
+//  - O retorno so tem "ativo" (true/false), sem data de baixa - entao esse
+//    caminho nunca aplica a regra de "baixada com data, libera com alerta"
+//    (ver Do Case dentro de AFIS022()); se aparecer "ativo := .F.", o
+//    resultado e tratado como inconclusivo (cai pro print manual), porque um
+//    "inativo" vindo de uma base com defasagem de ate 45 dias pode estar
+//    desatualizado - so o "ativo := .T." e confiavel o bastante pra liberar
+//    sozinho.
+//  - Cobertura de estados e defasagem de ate 45 dias (sincronizacao diaria
+//    com os Sintegras estaduais) - nao e tempo real como o TSS.
+// Retorno    : Objeto com:
+//              lConclusivo -> .T. se achou, pro CNPJ/UF informados, uma IE
+//                             igual a cIE na lista retornada
+//              lAtiva      -> .T./.F. - so tem significado quando lConclusivo
+//                             for .T.
+//===================================================================================
+Static Function AFIS022CNPJWS(cUF, cCNPJ, cIE)
+
+	Local oRet       := JsonObject():New()
+	Local cURL        := ""
+	Local cResposta   := ""
+	Local cHeaders    := ""
+	Local cCNPJLimpo  := ""
+	Local oJson       := Nil
+	Local aIEs        := {}
+	Local nI          := 0
+	Local cUFAch      := ""
+	Local cIEAch      := ""
+	//*** timeout curto de proposito - isso e so um fallback auxiliar entre o
+	//*** TSS falhar e o print manual, nao pode deixar o usuario esperando muito.
+	Local nTimeOut    := 8
+
+	oRet["lConclusivo"] := .F.
+	oRet["lAtiva"]       := .F.
+
+	cCNPJLimpo := AFIS022SOUNM(cCNPJ)
+
+	//*** CNPJ tem 14 digitos - se nao bater, nem tenta (evita mandar lixo
+	//*** pra API ou gastar uma das poucas requisicoes/minuto do plano publico)
+	If Len(cCNPJLimpo) != 14
+		Return oRet
+	EndIf
+
+	Begin Sequence
+
+		cURL := "https://publica.cnpj.ws/cnpj/" + cCNPJLimpo
+
+		cResposta := HttpGet(cURL, , nTimeOut, , @cHeaders)
+
+		If !Empty(cResposta)
+
+			oJson := JsonObject():New()
+			oJson:FromJson(cResposta)
+
+			aIEs := oJson["estabelecimento"]["inscricoes_estaduais"]
+
+			If ValType(aIEs) == "A"
+				For nI := 1 To Len(aIEs)
+					cUFAch := Upper(AllTrim(aIEs[nI]["estado"]["sigla"]))
+					cIEAch := AFIS022SOUNM(aIEs[nI]["inscricao_estadual"])
+
+					If cUFAch == Upper(AllTrim(cUF)) .And. !Empty(cIE) .And. cIEAch == AFIS022SOUNM(cIE)
+						oRet["lConclusivo"] := .T.
+						oRet["lAtiva"]      := aIEs[nI]["ativo"]
+					EndIf
+				Next nI
+			EndIf
+
+		EndIf
+
+	Recover
+		//*** qualquer falha aqui (timeout, sem resposta, JSON invalido, campo
+		//*** inesperado etc) e tratada como inconclusiva - nunca trava nada,
+		//*** so cai pro print manual como se o cnpj.ws nao existisse. O log do
+		//*** resultado final fica por conta do AFIS022FALLBACK (quem chama).
+		oRet["lConclusivo"] := .F.
+		oRet["lAtiva"]       := .F.
+
+	End Sequence
+
+Return oRet
+
+//===================================================================================
+// Funcao     : AFIS022TESTCNPJWS
+// Objetivo   : Funcao de teste ISOLADA pra validar a consulta ao cnpj.ws sem
+//              precisar passar pelo fluxo inteiro do AFIS022 (nem depender do
+//              TSS estar fora do ar). Chame direto (ex: pelo debugger, digitando
+//              U_AFIS022TESTCNPJWS("CNPJ", "UF", "IE") na janela de comandos,
+//              ou criando um botao temporario) passando CNPJ, UF e IE de um
+//              cliente real pra testar - SEM PADRAO fixo no codigo, pra nunca
+//              deixar CNPJ de cliente hardcoded aqui (isso vazaria pra versao
+//              publica no GitHub).
+//              Mantida no fonte de proposito (Fabio Dratcu, 28/08/2026) pra
+//              facilitar debug futuro se o fallback do cnpj.ws parar de
+//              funcionar (mudanca na API deles, rate limit, etc) - nao e
+//              chamada por nenhum outro lugar do AFIS022, entao nao tem custo
+//              nenhum deixar ela aqui parada.
+//              Mostra o resultado em MsgInfo/MsgAlert - use isso pra confirmar
+//              se o problema e rede (AppServer sem saida pra internet/HTTPS),
+//              parse do JSON, ou comparacao de UF/IE.
+// Autor-Data : Fabio Dratcu - 28/08/2026
+//===================================================================================
+User Function AFIS022TESTCNPJWS(cCNPJ, cUF, cIE)
+
+	Local oCons := Nil
+
+	Default cCNPJ := ""
+	Default cUF   := ""
+	Default cIE   := ""
+
+	If Empty(cCNPJ) .Or. Empty(cUF) .Or. Empty(cIE)
+		MsgAlert("Uso: U_AFIS022TESTCNPJWS('CNPJ', 'UF', 'IE') - informe os 3 parametros de um cliente real pra testar.", "Teste AFIS022CNPJWS")
+		Return Nil
+	EndIf
+
+	oCons := AFIS022CNPJWS(cUF, cCNPJ, cIE)
+
+	If oCons["lConclusivo"]
+		MsgInfo("Consulta concluida." + CRLF + CRLF + ;
+			"lConclusivo: SIM" + CRLF + ;
+			"lAtiva: " + IIf(oCons["lAtiva"], "SIM (ativa)", "NAO (baixada/inativa)"), ;
+			"Teste AFIS022CNPJWS")
+	Else
+		MsgAlert("Consulta INCONCLUSIVA - nao achou a IE informada pro CNPJ/UF informados, ou deu erro de rede/parse." + CRLF + CRLF + ;
+			"Veja o console do AppServer (ConOut) pra detalhes passo a passo.", ;
+			"Teste AFIS022CNPJWS")
+	EndIf
+
+Return Nil
