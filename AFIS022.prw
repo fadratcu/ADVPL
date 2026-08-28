@@ -439,7 +439,7 @@ Static Function AFIS022PRINT(cUF, cCNPJ, cCPF, cIE)
 	//*** direto no servidor SEUSERVIDOR - assim o print fica guardado la, sem
 	//*** o AFIS022 precisar copiar/gravar o arquivo em lugar nenhum.
 	//*** Fabio Dratcu - 28/08/2026.
-	If Left(Upper(cArqPrint), 2) <> "G:" .And. Left(Upper(cArqPrint), 13) <> "\\SEUSERVIDOR"
+	If Left(Upper(cArqPrint), 11) <> "G:\Sintegra" .OR. Left(Upper(cArqPrint), 36) <> "\\SEUSERVIDOR"
 		MsgAlert("O print precisa ser salvo na pasta Departamentos\Sintegra" + CRLF + ;
 			"(G:\Departamentos\Sintegra ou \\SEUSERVIDOR\Departamentos\Sintegra) antes de selecionar o arquivo." + CRLF + CRLF + ;
 			"Arquivo selecionado: " + cArqPrint, "Atencao")
